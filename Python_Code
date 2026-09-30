@@ -1,0 +1,262 @@
+import pandas as pd
+import numpy as np
+import re
+import nltk
+nltk.download("vader_lexicon")
+from sklearn.model_selection import train_test_split
+from sklearn.linear_model import LogisticRegression
+from sklearn.feature_extraction.text import TfidfVectorizer
+from nltk.sentiment.vader import SentimentIntensityAnalyzer
+from sklearn.metrics import accuracy_score, classification_report
+from sklearn.preprocessing import StandardScaler
+import matplotlib.pyplot as plt
+from sklearn.metrics import ConfusionMatrixDisplay
+
+
+def daten_einlesen():
+    #die drei einzelnen CSV-Dateien werden eingelesen
+    df_gen = pd.read_csv("sarcasm_v2/GEN-sarc-notsarc.csv")
+    df_hyp = pd.read_csv("sarcasm_v2/HYP-sarc-notsarc.csv")
+    df_rq = pd.read_csv("sarcasm_v2/RQ-sarc-notsarc.csv")
+
+    #die drei eingelesenen Dateien werden zu einer Datei zusammengefuehrt mithilfe der Funktion pandas.concat
+    #https://pandas.pydata.org/docs/reference/api/pandas.concat.html#pandas-concat
+    df = pd.concat([df_gen, df_hyp, df_rq],ignore_index = True)
+
+    return df
+    
+def label_definieren(df):
+    #die labels "sarc" und "notsarc" werden in 1 und 0 umgewandelt
+    y = []
+    #Schleife ueber jede Zeile in der Spalte "class"
+    for label in df["class"]: 
+        if label == "sarc":
+            y.append(1) #Sarkasmus wird zu 1 kodiert
+        else:
+            y.append(0) #Nicht-Sarkasmus wird zu 0 kodiert
+        
+    return y
+
+def features_definieren(df):
+    #der VADER Sentiment-Analyzer wird aufgerufen
+    #https://www.nltk.org/api/nltk.sentiment.vader.html
+    sentiment_analyse = SentimentIntensityAnalyzer()
+    
+    features = [] #hier werden die Features gespeichert
+
+    #fuer jeden Text werden die Features berechnet
+    for text in df["text"]:
+        text_laenge = len(text) 
+        ausrufezeichen = text.count("!")
+        fragezeichen = text.count("?")
+        
+        #diese Features werden mithilfe Regular Expressions gesucht
+        #https://docs.python.org/3/library/re.html#regular-expression-syntax
+        auslassungspunkte = len(re.findall(r"\.\.\.", text))
+        anfuhrungszeichen = len(re.findall(r'["\']', text))
+        grossbuchstaben = len(re.findall(r"[A-Z]", text))
+        wiederholte_buchstaben = len(re.findall(r"([a-zA-Z])\1{2,}", text))
+
+        #die Sentiment-Werte der Texte werden berechnet
+        sentiment = sentiment_analyse.polarity_scores(text)
+
+        features.append({
+            "text_laenge": text_laenge,
+            "ausrufezeichen": ausrufezeichen,
+            "fragezeichen": fragezeichen,
+            "auslassungspunkte": auslassungspunkte,
+            "anfuehrungszeichen": anfuhrungszeichen,
+            "grossbuchstaben": grossbuchstaben,
+            "wiederholte_buchstaben": wiederholte_buchstaben,
+            "negativ": sentiment["neg"],
+            "neutral": sentiment["neu"],
+            "positiv": sentiment["pos"],
+            "compound": sentiment["compound"]})
+
+    return pd.DataFrame(features,  index = df.index) #
+
+def modell_trainieren(df):
+    labels = label_definieren(df) #die Labels
+
+    #die Daten werden in Trainings- und Testdaten aufgeteilt, mithilfe von train_test_split
+    #https://scikit-learn.org/stable/modules/generated/sklearn.model_selection.train_test_split.html#sklearn.model_selection.train_test_split
+    #80% Trainingsdaten und 20% Testdaten
+    texte_train, texte_test, labels_train, labels_test = train_test_split(df["text"], labels, train_size = 0.8, random_state = 16)
+    
+    #die Woerter werden in eine Matrix umgewandelt, mithilfe des TfidfVectorizer
+    #https://scikit-learn.org/stable/modules/generated/sklearn.feature_extraction.text.TfidfVectorizer.html#sklearn.feature_extraction.text.TfidfVectorizer.fit_transform
+    #das Vokabular wird auf maximal 1.000 Wörter begrenzt und Stoppwoerter werden ignoriert
+    vectorizer = TfidfVectorizer(max_features = 1000, stop_words = "english")
+    wort_features_train = vectorizer.fit_transform(texte_train) #auf Trainingsdaten lernen
+    wort_features_test = vectorizer.transform(texte_test) #auf Testdaten anwenden
+
+    #die Text-Matrizen werden in ein Dataframe umgewandelt
+    #mithilfe von toarray() wird die Matrix in ein normales Array umgewandelt
+    #https://docs.scipy.org/doc/scipy/reference/generated/scipy.sparse.csr_matrix.toarray.html
+    wort_features_train = pd.DataFrame(wort_features_train.toarray(), index = texte_train.index)
+    wort_features_test = pd.DataFrame(wort_features_test.toarray(), index = texte_test.index)
+
+    #die Features werden fuer die Trainings- und Testdaten erstellt
+    #https://pandas.pydata.org/docs/reference/api/pandas.DataFrame.loc.html
+    features_train_extra = features_definieren(df.loc[texte_train.index])
+    features_test_extra = features_definieren(df.loc[texte_test.index])
+
+    #die Features und die Wort-Features werden fuer die Trainings- und Tesdaten zusammengefuegt mithilfe von pd.concat()
+    #https://pandas.pydata.org/docs/reference/api/pandas.concat.html#pandas.concat
+    features_train = pd.concat([wort_features_train, features_train_extra], axis = 1)
+    features_test = pd.concat([wort_features_test, features_test_extra], axis = 1)
+
+    #alle Spalten werden in Strings umgewandelt
+    features_train.columns = features_train.columns.astype(str)
+    features_test.columns = features_test.columns.astype(str)
+
+    #alle Features werden auf eine Skala standardisiert mithilfe des Standardscaler
+    #https://scikit-learn.org/stable/modules/generated/sklearn.preprocessing.StandardScaler.html
+    scaler = StandardScaler()
+    features_train = scaler.fit_transform(features_train) #auf Trainingsdaten lernen
+    features_test = scaler.transform(features_test) #auf Testdaten anwenden
+
+    #die logistische Regression wird erstellt mithilfe von Scikit-Learn
+    #https://scikit-learn.org/stable/modules/generated/sklearn.linear_model.LogisticRegression.html#sklearn.linear_model.LogisticRegression
+    modell = LogisticRegression(random_state = 16, max_iter = 1000)
+    modell.fit(features_train, labels_train) #das Modell wird trainiert anhand den Trainingsdaten
+    vorhersagen = modell.predict(features_test) #das Modell trifft die Vorhersagen fuer die Testdaten
+
+
+    return modell, vectorizer, features_train_extra, labels_test, vorhersagen, features_test, df.loc[texte_test.index]
+
+def ergebnisse_ausgeben(modell, vectorizer, features, labels_test, vorhersagen):
+
+    #die Accuracy und der Classification Report werden ausgerechnet
+    #https://scikit-learn.org/stable/modules/generated/sklearn.metrics.accuracy_score.html#sklearn.metrics.accuracy_score
+    #https://scikit-learn.org/stable/modules/generated/sklearn.metrics.classification_report.html
+    accuracy = accuracy_score(labels_test, vorhersagen)
+    print("ACCURACY:", accuracy)
+    print("\nCLASSIFICATION REPORT:")
+    print(classification_report(labels_test, vorhersagen, zero_division = 0))
+    
+    woerter = vectorizer.get_feature_names_out() #die verwendeten Wort-Features werden geholt
+    feature_namen = features.columns #die Namen der Features werden geholt
+    alle_features = list(woerter) + list(feature_namen) #alle Features werden zusammengefuehrt
+    koeffizienten = modell.coef_[0] #die Koeffizienten des Modells werden geholt
+    feature_ergebnisse = pd.DataFrame({"Feature": alle_features,"Koeffizient": koeffizienten}) #die Features und die Koeffizienten werden zusammengefuehrt
+
+    #die Top 20 Features mit positiven Koeffizienten werden ausgegeben
+    fuer_sarkasmus = feature_ergebnisse.sort_values(by = "Koeffizient", ascending = False)
+    print("\nTOP 20 FEATURES FÜR SARKASMUS:")
+    print(fuer_sarkasmus.head(20).to_string(index = False))
+
+    #die Top 20 Features mit negativen Koeffizienten werden ausgegeben
+    gegen_sarkasmus = feature_ergebnisse.sort_values(by = "Koeffizient", ascending = True)
+    print("\nTOP 20 FEATURES GEGEN SARKASMUS:")
+    print(gegen_sarkasmus.head(20).to_string(index = False))
+ 
+    wort_features = feature_ergebnisse[feature_ergebnisse["Feature"].isin(woerter)] #nur die Wort-Features werden geholt
+
+    #die Top 20 Woerter, die für Sarkasmus sprechen
+    woerter_fuer_sarkasmus = wort_features.sort_values(by = "Koeffizient", ascending = False)
+    print("\nTOP WÖRTER FÜR SARKASMUS:")
+    print(woerter_fuer_sarkasmus.head(20).to_string(index = False))
+
+    #die Top 20 Woerter, die gegen Sarkasmus sprechen
+    woerter_gegen_sarkasmus = wort_features.sort_values(by = "Koeffizient", ascending = True)
+    print("\nTOP WÖRTER GEGEN SARKASMUS:")
+    print(woerter_gegen_sarkasmus.head(20).to_string(index=False))
+
+def ergebnisse_plotten(modell, vectorizer, features, labels_test, vorhersagen):
+    #die Ergebnisse werden mithilfe Matplotlib visualisiert
+    #https://matplotlib.org/stable/plot_types/index.html
+
+    #Confusionmatrix
+    fig, ax = plt.subplots(figsize = (6, 6))
+    ConfusionMatrixDisplay.from_predictions(labels_test, vorhersagen, ax = ax, cmap = "Blues", colorbar = False)
+    plt.title("Konfusionsmatrix (Sarkasmus-Erkennung)")
+    plt.xlabel("Vorhergesagtes Label")
+    plt.ylabel("Tatsächliches Label")
+    plt.tight_layout()
+    plt.show()
+
+    #Vorbereitung der Features und Koeffizienten für die Plots
+    woerter = vectorizer.get_feature_names_out()
+    feature_namen = features.columns
+    alle_features = list(woerter) + list(feature_namen)
+    koeffizienten = modell.coef_[0]
+    feature_ergebnisse = pd.DataFrame({"Feature": alle_features, "Koeffizient": koeffizienten})
+    wort_features = feature_ergebnisse[feature_ergebnisse["Feature"].isin(woerter)]
+
+    #Top 20 Features fuer Sarkasmus
+    top_features_sarkasmus = feature_ergebnisse.sort_values(by = "Koeffizient", ascending = False).head(20)
+    plt.figure(figsize = (10, 6))
+    plt.barh(top_features_sarkasmus["Feature"][::-1], top_features_sarkasmus["Koeffizient"][::-1], color = "lightblue")
+    plt.title("Top 20 Features für Sarkasmus (Modell-Koeffizienten)")
+    plt.xlabel("Koeffizient")
+    plt.tight_layout()
+    plt.show()
+
+    #Top 20 Features gegen Sarkasmus
+    top_features_nichtsarkasmus = feature_ergebnisse.sort_values(by = "Koeffizient", ascending = True).head(20)
+    plt.figure(figsize = (10, 6))
+    plt.barh(top_features_nichtsarkasmus["Feature"][::-1], top_features_nichtsarkasmus["Koeffizient"][::-1], color = "orangered")
+    plt.title("Top 20 Features gegen Sarkasmus (Modell-Koeffizienten)")
+    plt.xlabel("Koeffizient")
+    plt.tight_layout()
+    plt.show()
+
+    #Top 20 Woerter fuer Sarkasmus
+    top_woerter_sarkasmus = wort_features.sort_values(by = "Koeffizient", ascending = False).head(20)
+    plt.figure(figsize = (10, 6))
+    plt.barh(top_woerter_sarkasmus["Feature"][::-1], top_woerter_sarkasmus["Koeffizient"][::-1], color = "lightgreen")
+    plt.title("Top 20 Wörter für Sarkasmus")
+    plt.xlabel("Koeffizient")
+    plt.tight_layout()
+    plt.show()
+
+    #Top 20 Woerter gegen Sarkasmus
+    top_woerter_nichtsarkasmus = wort_features.sort_values(by = "Koeffizient", ascending = True).head(20)
+    plt.figure(figsize = (10, 6))
+    plt.barh(top_woerter_nichtsarkasmus["Feature"][::-1], top_woerter_nichtsarkasmus["Koeffizient"][::-1], color = "violet")
+    plt.title("Top 20 Wörter gegen Sarkasmus")
+    plt.xlabel("Koeffizient")
+    plt.tight_layout()
+    plt.show()
+
+def fehleranalyse(modell, features_test, labels_test, test_daten):
+
+    #die Vorhersagen und Wahrscheinlichkeiten werden berechnet
+    #https://scikit-learn.org/stable/modules/generated/sklearn.linear_model.LogisticRegression.html#sklearn.linear_model.LogisticRegression.predict_proba
+    vorhersagen = modell.predict(features_test)
+    wahrscheinlichkeiten = modell.predict_proba(features_test)
+    wahrscheinlichkeit = np.max(wahrscheinlichkeiten, axis=1) #die hoechste Wahrscheinlichkeit wird verwendet
+
+    #die Ergebnisse werden in einem DataFrame gespeichert
+    auswertung = pd.DataFrame({"text": test_daten["text"].values, "richtiges_label": labels_test, "vorhergesagtes_label": vorhersagen, "wahrscheinlichkeit": wahrscheinlichkeit})
+
+    #die False Positives werden herausgefiltert
+    false_positives = auswertung[(auswertung["vorhergesagtes_label"] == 1) & (auswertung["richtiges_label"] == 0)]
+    #die False Negatives werden herausgefiltert
+    false_negatives = auswertung[(auswertung["vorhergesagtes_label"] == 0) & (auswertung["richtiges_label"] == 1)]
+
+    #Ausgabe der Top 5 false positves
+    print("\nFALSE POSITIVES")
+    #nach Wahrscheinlichkeit absteigend sortieren und die ersten 5 nehmen
+    top_fp = false_positives.sort_values(by="wahrscheinlichkeit", ascending=False).head(5)
+    #durchlaeuft zeilenwiese den Dataframe mithilfe iterrows
+    #https://pandas.pydata.org/docs/reference/api/pandas.DataFrame.iterrows.html
+    for i, zeile in top_fp.iterrows():
+        print("Text:", zeile["text"])
+        print("Wahrscheinlichkeit:", round(zeile["wahrscheinlichkeit"], 4))
+
+    #Ausgabe der Top 5 false negatives
+    print("\nFALSE NEGATIVES")
+    top_fn = false_negatives.sort_values(by="wahrscheinlichkeit", ascending=False).head(5)
+    for i, zeile in top_fn.iterrows():
+        print("Text:", zeile["text"])
+        print("Wahrscheinlichkeit:", round(zeile["wahrscheinlichkeit"], 4))
+
+# Hauptprogramm
+if __name__ == "__main__":
+    daten = daten_einlesen()
+    (modell, vectorizer, features, labels_test, vorhersagen, features_test, test_daten) = modell_trainieren(daten)
+    ergebnisse_ausgeben(modell, vectorizer, features, labels_test, vorhersagen)
+    ergebnisse_plotten(modell, vectorizer, features, labels_test, vorhersagen)
+    fehleranalyse(modell, features_test, labels_test, test_daten)
